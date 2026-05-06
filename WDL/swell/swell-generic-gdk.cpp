@@ -115,6 +115,8 @@ static DWORD swell_dragsrc_timeout_start;
 static HWND swell_dragsrc_hwnd;
 static DWORD swell_lastMessagePos;
 static const char *swell_dragsrc_fn;
+static GdkDragContext *s_drop_ctx; // context for deferred gdk_drop_finish
+static guint32 s_drop_time; // timestamp for gdk_drop_finish
 
 static int gdk_options;
 #define OPTION_KEEP_OWNED_ABOVE 1
@@ -2673,7 +2675,7 @@ static LRESULT xbridgeProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 }
 
 
-static void forward_x11_drag_message(int gdkmsg, GdkEventDND *gdkevent, Window new_target)
+static void forward_x11_drag_message(int gdkmsg, GdkEventDND *gdkevent, Window new_target, Window source_override = 0)
 {
   Display *dpy = gdk_x11_display_get_xdisplay(gdk_window_get_display(gdkevent->window));
   if (WDL_NOT_NORMALLY(!dpy)) return;
@@ -2683,8 +2685,17 @@ static void forward_x11_drag_message(int gdkmsg, GdkEventDND *gdkevent, Window n
   xev.type = ClientMessage;
   xev.window = new_target;
   xev.format = 32;
-  GdkWindow *sw = gdk_drag_context_get_source_window(gdkevent->context);
-  Window source_window = GDK_WINDOW_XID(sw);
+
+  Window source_window;
+  if (source_override)
+  {
+    source_window = source_override;
+  }
+  else
+  {
+    GdkWindow *sw = gdk_drag_context_get_source_window(gdkevent->context);
+    source_window = GDK_WINDOW_XID(sw);
+  }
   xev.data.l[0] = source_window;
 
   switch (gdkmsg)
@@ -2711,7 +2722,8 @@ static void forward_x11_drag_message(int gdkmsg, GdkEventDND *gdkevent, Window n
             l = l->next;
           }
         }
-        if (cnt > 3) xev.data.l[1] |= 1; // more types available that we couldn't fit
+        if (cnt > 3 && !source_override)
+          xev.data.l[1] |= 1;
       }
     break;
     case GDK_DRAG_LEAVE:
@@ -2799,7 +2811,7 @@ static bool validate_bridged_xw_from_tlhwnd(HWND hwnd, Window xw)
   return false;
 }
 
-static Window hit_test_bridged_xw(HWND hwnd, int xpos, int ypos)
+static Window hit_test_bridged_xw(HWND hwnd, int xpos, int ypos, Window *out_bridge = nullptr)
 {
   if (WDL_NOT_NORMALLY(!hwnd || !hwnd->m_oswindow)) return false;
   POINT pt = { xpos, ypos };
@@ -2830,6 +2842,7 @@ static Window hit_test_bridged_xw(HWND hwnd, int xpos, int ypos)
         if (XGetWindowAttributes(dpy, list[i], &xwa) && lx >= xwa.x && ly >= xwa.y && lx < xwa.x+xwa.width && ly < xwa.y+xwa.height)
         {
           new_target = list[i];
+          if (out_bridge) *out_bridge = bs->native_w;
         }
       }
       XFree(list);
@@ -2853,6 +2866,8 @@ static bool OnDragEventDelegate(GdkEvent *evt)
 
   static HWND s_last_hwnd;
   static Window s_last_child_xw;
+  // bridge window for source override
+  static Window s_last_bridge_xw;
   HWND hwnd = swell_oswindow_to_hwnd(((GdkEventAny*)evt)->window);
   GdkEventDND *e = (GdkEventDND *)evt;
 
@@ -2868,7 +2883,13 @@ static bool OnDragEventDelegate(GdkEvent *evt)
         }
         else if (SWELL_DDrop_onDragLeave) SWELL_DDrop_onDragLeave();
         s_last_child_xw = 0;
+        s_last_bridge_xw = 0;
         s_last_hwnd = NULL;
+        // clean up stored drop context on leave (drag canceled)
+        if (s_drop_ctx) {
+          g_object_unref(s_drop_ctx);
+          s_drop_ctx = NULL;
+        }
       }
     break;
     case GDK_DROP_FINISHED:
@@ -2878,8 +2899,14 @@ static bool OnDragEventDelegate(GdkEvent *evt)
           forward_x11_drag_message(GDK_DRAG_LEAVE,e,s_last_child_xw);
       }
       s_last_child_xw = 0;
+      s_last_bridge_xw = 0;
       s_last_hwnd = NULL;
       if (SWELL_DDrop_onDragLeave) SWELL_DDrop_onDragLeave();
+      // clean up stored drop context
+      if (s_drop_ctx) {
+        g_object_unref(s_drop_ctx);
+        s_drop_ctx = NULL;
+      }
     break;
     case GDK_DRAG_ENTER:
       if (s_last_hwnd != hwnd && validate_top_hwnd(s_last_hwnd))
@@ -2891,10 +2918,17 @@ static bool OnDragEventDelegate(GdkEvent *evt)
         }
         else if (SWELL_DDrop_onDragLeave) SWELL_DDrop_onDragLeave();
         s_last_child_xw = 0;
+        s_last_bridge_xw = 0;
         s_last_hwnd = NULL;
+        // clean up on new drag enter
+        if (s_drop_ctx) {
+          g_object_unref(s_drop_ctx);
+          s_drop_ctx = NULL;
+        }
       }
       s_last_hwnd = hwnd;
       s_last_child_xw = 0;
+      s_last_bridge_xw = 0;
       // position info is not yet available, assume top level window will get it
       if (WDL_NORMALLY(hwnd) && WDL_NORMALLY(e->context))
       {
@@ -2904,7 +2938,8 @@ static bool OnDragEventDelegate(GdkEvent *evt)
     return true;
     case GDK_DRAG_MOTION:
       {
-        Window xw = hit_test_bridged_xw(hwnd, e->x_root, e->y_root);
+        Window bridge_xw = 0;
+        Window xw = hit_test_bridged_xw(hwnd, e->x_root, e->y_root, &bridge_xw);
         if (xw)
         {
           if (!s_last_child_xw)
@@ -2916,9 +2951,10 @@ static bool OnDragEventDelegate(GdkEvent *evt)
           {
             if (s_last_child_xw && validate_top_hwnd(s_last_hwnd) && validate_bridged_xw_from_tlhwnd(s_last_hwnd,s_last_child_xw))
               forward_x11_drag_message(GDK_DRAG_LEAVE,e,s_last_child_xw);
-            forward_x11_drag_message(GDK_DRAG_ENTER,e,xw);
+            forward_x11_drag_message(GDK_DRAG_ENTER,e,xw,bridge_xw);
           }
           s_last_child_xw = xw;
+          s_last_bridge_xw = bridge_xw;
         }
         else
         {
@@ -2927,6 +2963,7 @@ static bool OnDragEventDelegate(GdkEvent *evt)
             if (validate_top_hwnd(s_last_hwnd) && validate_bridged_xw_from_tlhwnd(s_last_hwnd,s_last_child_xw))
               forward_x11_drag_message(GDK_DRAG_LEAVE,e,s_last_child_xw);
             s_last_child_xw = 0;
+            s_last_bridge_xw = 0;
             notify_drag_enter((int)e->x_root, (int)e->y_root);
           }
         }
@@ -2934,7 +2971,7 @@ static bool OnDragEventDelegate(GdkEvent *evt)
         gdk_drag_status(e->context,GDK_ACTION_COPY,e->time);
         if (xw)
         {
-          forward_x11_drag_message(GDK_DRAG_MOTION,e,xw);
+          forward_x11_drag_message(GDK_DRAG_MOTION,e,xw,bridge_xw);
         }
         else
         {
@@ -2952,9 +2989,16 @@ static bool OnDragEventDelegate(GdkEvent *evt)
         {
           if (WDL_NORMALLY(validate_bridged_xw_from_tlhwnd(hwnd,s_last_child_xw)))
           {
-            forward_x11_drag_message(GDK_DROP_START,e,s_last_child_xw);
+            forward_x11_drag_message(GDK_DROP_START,e,s_last_child_xw,s_last_bridge_xw);
+            // store context (gdk_drop_finish will be called when plugin sends XdndFinished)
+            if (s_drop_ctx)
+              g_object_unref(s_drop_ctx);
+
+            s_drop_ctx = (GdkDragContext*)g_object_ref(e->context);
+            s_drop_time = e->time;
             s_last_hwnd = NULL;
             s_last_child_xw = 0;
+            s_last_bridge_xw = 0;
           }
         }
         else
@@ -3120,6 +3164,47 @@ static GdkFilterReturn filterCreateShowProc(GdkXEvent *xev, GdkEvent *event, gpo
                 return GDK_FILTER_REMOVE;
               }
             }
+          }
+        }
+      }
+    break;
+    case ClientMessage:
+      {
+        const XClientMessageEvent *cm = &xevent->xclient;
+        Display *disp = xevent->xany.display;
+        for (int x = 0; x < filter_windows.GetSize(); x++)
+        {
+          bridgeState *bs = filter_windows.Get(x);
+          if (bs && bs->native_w == cm->window && bs->native_disp == disp)
+          {
+            static Atom s_xdndFinished = 0;
+            static Atom s_xdndStatus = 0;
+            if (!s_xdndFinished)
+            {
+              s_xdndFinished = XInternAtom(disp, "XdndFinished", False);
+              s_xdndStatus = XInternAtom(disp, "XdndStatus", False);
+            }
+
+            if (cm->message_type == s_xdndFinished)
+            {
+              // Plugin sends drop completion so relay to drop source
+              if (s_drop_ctx)
+              {
+                bool accepted = (cm->data.l[1] & 1) != 0;
+                gdk_drop_finish(s_drop_ctx, accepted, s_drop_time);
+                g_object_unref(s_drop_ctx);
+                s_drop_ctx = NULL;
+              }
+              return GDK_FILTER_REMOVE;
+            }
+            else if (cm->message_type == s_xdndStatus)
+            {
+              // Plugin reports accept/reject. We could relay to gdk_drag_status here.
+              // That will probably fix the dragging mouse cursor icon to show an icon that matches the reported value.
+              // For now, just consume it (Reaper already calls gdk_drag_status unconditionally)
+              return GDK_FILTER_REMOVE;
+            }
+            break;
           }
         }
       }
