@@ -117,6 +117,8 @@ static DWORD swell_lastMessagePos;
 static const char *swell_dragsrc_fn;
 static GdkDragContext *s_drop_ctx; // context for deferred gdk_drop_finish
 static guint32 s_drop_time; // timestamp for gdk_drop_finish
+static GdkDragContext *s_drag_status_ctx; // context for relayed XdndStatus -> gdk_drag_status
+static guint32 s_drag_status_time; // timestamp to use for gdk_drag_status
 
 static int gdk_options;
 #define OPTION_KEEP_OWNED_ABOVE 1
@@ -2811,6 +2813,34 @@ static bool validate_bridged_xw_from_tlhwnd(HWND hwnd, Window xw)
   return false;
 }
 
+static void clear_relay_drag_status_ctx()
+{
+  if (s_drag_status_ctx)
+  {
+    g_object_unref(s_drag_status_ctx);
+    s_drag_status_ctx = NULL;
+  }
+  s_drag_status_time = GDK_CURRENT_TIME;
+}
+
+static void update_relay_drag_status_ctx(GdkDragContext *ctx, guint32 time)
+{
+  if (WDL_NOT_NORMALLY(!ctx))
+  {
+    clear_relay_drag_status_ctx();
+    return;
+  }
+
+  if (s_drag_status_ctx != ctx)
+  {
+    if (s_drag_status_ctx)
+      g_object_unref(s_drag_status_ctx);
+
+    s_drag_status_ctx = (GdkDragContext*) g_object_ref(ctx);
+  }
+  s_drag_status_time = time;
+}
+
 static Window hit_test_bridged_xw(HWND hwnd, int xpos, int ypos, Window *out_bridge = nullptr)
 {
   if (WDL_NOT_NORMALLY(!hwnd || !hwnd->m_oswindow)) return false;
@@ -2890,6 +2920,7 @@ static bool OnDragEventDelegate(GdkEvent *evt)
           g_object_unref(s_drop_ctx);
           s_drop_ctx = NULL;
         }
+        clear_relay_drag_status_ctx();
       }
     break;
     case GDK_DROP_FINISHED:
@@ -2907,6 +2938,7 @@ static bool OnDragEventDelegate(GdkEvent *evt)
         g_object_unref(s_drop_ctx);
         s_drop_ctx = NULL;
       }
+      clear_relay_drag_status_ctx();
     break;
     case GDK_DRAG_ENTER:
       if (s_last_hwnd != hwnd && validate_top_hwnd(s_last_hwnd))
@@ -2925,10 +2957,12 @@ static bool OnDragEventDelegate(GdkEvent *evt)
           g_object_unref(s_drop_ctx);
           s_drop_ctx = NULL;
         }
+        clear_relay_drag_status_ctx();
       }
       s_last_hwnd = hwnd;
       s_last_child_xw = 0;
       s_last_bridge_xw = 0;
+      clear_relay_drag_status_ctx();
       // position info is not yet available, assume top level window will get it
       if (WDL_NORMALLY(hwnd) && WDL_NORMALLY(e->context))
       {
@@ -2942,6 +2976,7 @@ static bool OnDragEventDelegate(GdkEvent *evt)
         Window xw = hit_test_bridged_xw(hwnd, e->x_root, e->y_root, &bridge_xw);
         if (xw)
         {
+          update_relay_drag_status_ctx(e->context,e->time);
           if (!s_last_child_xw)
           {
             if (SWELL_DDrop_onDragLeave) SWELL_DDrop_onDragLeave();
@@ -2958,6 +2993,7 @@ static bool OnDragEventDelegate(GdkEvent *evt)
         }
         else
         {
+          clear_relay_drag_status_ctx();
           if (s_last_child_xw)
           {
             if (validate_top_hwnd(s_last_hwnd) && validate_bridged_xw_from_tlhwnd(s_last_hwnd,s_last_child_xw))
@@ -2999,10 +3035,12 @@ static bool OnDragEventDelegate(GdkEvent *evt)
             s_last_hwnd = NULL;
             s_last_child_xw = 0;
             s_last_bridge_xw = 0;
+            clear_relay_drag_status_ctx();
           }
         }
         else
         {
+          clear_relay_drag_status_ctx();
           GdkDragContext *ctx = e->context;
           if (ctx)
           {
@@ -3179,10 +3217,20 @@ static GdkFilterReturn filterCreateShowProc(GdkXEvent *xev, GdkEvent *event, gpo
           {
             static Atom s_xdndFinished = 0;
             static Atom s_xdndStatus = 0;
+            static Atom s_xdndActionCopy = 0;
+            static Atom s_xdndActionMove = 0;
+            static Atom s_xdndActionLink = 0;
+            static Atom s_xdndActionAsk = 0;
+            static Atom s_xdndActionPrivate = 0;
             if (!s_xdndFinished)
             {
               s_xdndFinished = XInternAtom(disp, "XdndFinished", False);
               s_xdndStatus = XInternAtom(disp, "XdndStatus", False);
+              s_xdndActionCopy = XInternAtom(disp, "XdndActionCopy", False);
+              s_xdndActionMove = XInternAtom(disp, "XdndActionMove", False);
+              s_xdndActionLink = XInternAtom(disp, "XdndActionLink", False);
+              s_xdndActionAsk = XInternAtom(disp, "XdndActionAsk", False);
+              s_xdndActionPrivate = XInternAtom(disp, "XdndActionPrivate", False);
             }
 
             if (cm->message_type == s_xdndFinished)
@@ -3195,13 +3243,38 @@ static GdkFilterReturn filterCreateShowProc(GdkXEvent *xev, GdkEvent *event, gpo
                 g_object_unref(s_drop_ctx);
                 s_drop_ctx = NULL;
               }
+              clear_relay_drag_status_ctx();
               return GDK_FILTER_REMOVE;
             }
             else if (cm->message_type == s_xdndStatus)
             {
-              // Plugin reports accept/reject. We could relay to gdk_drag_status here.
-              // That will probably fix the dragging mouse cursor icon to show an icon that matches the reported value.
-              // For now, just consume it (Reaper already calls gdk_drag_status unconditionally)
+              if (s_drag_status_ctx)
+              {
+                const bool accepted = (cm->data.l[1] & 1) != 0;
+                GdkDragAction action = (GdkDragAction) 0;
+                if (accepted)
+                {
+                  const Atom xaction = (Atom) cm->data.l[4];
+                  if (xaction == s_xdndActionCopy)
+                    action = GDK_ACTION_COPY;
+                  else if (xaction == s_xdndActionMove)
+                    action = GDK_ACTION_MOVE;
+                  else if (xaction == s_xdndActionLink)
+                    action = GDK_ACTION_LINK;
+#ifdef GDK_ACTION_ASK
+                  else if (xaction == s_xdndActionAsk)
+                    action = GDK_ACTION_ASK;
+#endif
+#ifdef GDK_ACTION_PRIVATE
+                  else if (xaction == s_xdndActionPrivate)
+                    action = GDK_ACTION_PRIVATE;
+#endif
+                  else
+                    action = GDK_ACTION_COPY;
+                }
+
+                gdk_drag_status(s_drag_status_ctx, action, s_drag_status_time);
+              }
               return GDK_FILTER_REMOVE;
             }
             break;
