@@ -2726,10 +2726,13 @@ static void forward_x11_drag_message(int gdkmsg, GdkEventDND *gdkevent, Window n
         }
         if (cnt > 3 && !source_override)
           xev.data.l[1] |= 1;
+
+        printf("swell-generic-gdk: XDND forward XdndEnter to 0x%lx source=0x%lx version=3 types=%d%s\n", (unsigned long)new_target, (unsigned long)source_window, cnt, (cnt > 3 && !source_override) ? " more-types" : "");
       }
     break;
     case GDK_DRAG_LEAVE:
       xev.message_type = XInternAtom(dpy, "XdndLeave", False);
+      printf("swell-generic-gdk: XDND forward XdndLeave to 0x%lx source=0x%lx\n", (unsigned long)new_target, (unsigned long)source_window);
     break;
     case GDK_DRAG_MOTION:
       xev.message_type = XInternAtom(dpy, "XdndPosition", False);
@@ -2737,10 +2740,12 @@ static void forward_x11_drag_message(int gdkmsg, GdkEventDND *gdkevent, Window n
       xev.data.l[2] = ((int)gdkevent->x_root << 16) | ((int)gdkevent->y_root & 0xFFFF);
       xev.data.l[3] = gdkevent->time;
       xev.data.l[4] = XInternAtom(dpy, "XdndActionCopy", False);
+      printf("swell-generic-gdk: XDND forward XdndPosition to 0x%lx source=0x%lx pos=%d, %d\n", (unsigned long)new_target, (unsigned long)source_window, (int)gdkevent->x_root, (int)gdkevent->y_root);
     break;
     case GDK_DROP_START:
       xev.message_type = XInternAtom(dpy, "XdndDrop", False);
       xev.data.l[2] = gdkevent->time;
+      printf("swell-generic-gdk: XDND forward XdndDrop to 0x%lx source=0x%lx time=%u\n", (unsigned long)new_target, (unsigned long)source_window, (unsigned int)gdkevent->time);
     break;
     default:
       WDL_ASSERT(false);
@@ -2904,6 +2909,7 @@ static bool OnDragEventDelegate(GdkEvent *evt)
   switch (evt->type)
   {
     case GDK_DRAG_LEAVE:
+      printf("swell-generic-gdk: XDND GDK_DRAG_LEAVE hwnd=%p s_last_hwnd=%p s_last_child_xw=0x%lx\n", hwnd, s_last_hwnd, (unsigned long)s_last_child_xw);
       if (s_last_hwnd && s_last_hwnd == hwnd)
       {
         if (s_last_child_xw)
@@ -2924,6 +2930,7 @@ static bool OnDragEventDelegate(GdkEvent *evt)
       }
     break;
     case GDK_DROP_FINISHED:
+      printf("swell-generic-gdk: XDND GDK_DROP_FINISHED hwnd=%p s_last_child_xw=0x%lx\n", hwnd, (unsigned long)s_last_child_xw);
       if (s_last_child_xw && validate_top_hwnd(s_last_hwnd))
       {
         if (validate_bridged_xw_from_tlhwnd(s_last_hwnd,s_last_child_xw))
@@ -2941,6 +2948,7 @@ static bool OnDragEventDelegate(GdkEvent *evt)
       clear_relay_drag_status_ctx();
     break;
     case GDK_DRAG_ENTER:
+      printf("swell-generic-gdk: XDND GDK_DRAG_ENTER hwnd=%p\n", hwnd);
       if (s_last_hwnd != hwnd && validate_top_hwnd(s_last_hwnd))
       {
         if (s_last_child_xw)
@@ -2974,6 +2982,7 @@ static bool OnDragEventDelegate(GdkEvent *evt)
       {
         Window bridge_xw = 0;
         Window xw = hit_test_bridged_xw(hwnd, e->x_root, e->y_root, &bridge_xw);
+        printf("swell-generic-gdk: XDND GDK_DRAG_MOTION hwnd=%p pos=%d,%d bridged_xw=0x%lx\n", hwnd, (int)e->x_root, (int)e->y_root, (unsigned long)xw);
         if (xw)
         {
           update_relay_drag_status_ctx(e->context,e->time);
@@ -3021,6 +3030,7 @@ static bool OnDragEventDelegate(GdkEvent *evt)
     break;
     case GDK_DROP_START:
       {
+        printf("swell-generic-gdk: XDND GDK_DROP_START hwnd=%p s_last_hwnd=%p s_last_child_xw=0x%lx\n", hwnd, s_last_hwnd, (unsigned long)s_last_child_xw);
         if (hwnd && hwnd == s_last_hwnd && s_last_child_xw)
         {
           if (WDL_NORMALLY(validate_bridged_xw_from_tlhwnd(hwnd,s_last_child_xw)))
@@ -3051,6 +3061,7 @@ static bool OnDragEventDelegate(GdkEvent *evt)
             GdkAtom srca = gdk_drag_get_selection(ctx);
             gdk_selection_convert(e->window,srca,urilistatom(),e->time);
             gdk_drop_finish(ctx,TRUE,e->time);
+            printf("swell-generic-gdk: XDND local drop handled (non-bridged)\n");
           }
         }
         if (SWELL_DDrop_onDragLeave) SWELL_DDrop_onDragLeave();
@@ -3236,18 +3247,26 @@ static GdkFilterReturn filterCreateShowProc(GdkXEvent *xev, GdkEvent *event, gpo
             if (cm->message_type == s_xdndFinished)
             {
               // Plugin sends drop completion so relay to drop source
+              printf("swell-generic-gdk: XDND received XdndFinished from plugin window 0x%lx\n",
+                     (unsigned long)cm->window);
               if (s_drop_ctx)
               {
                 bool accepted = (cm->data.l[1] & 1) != 0;
+                printf("swell-generic-gdk: XDND relaying XdndFinished -> gdk_drop_finish(accepted=%d)\n", (int)accepted);
                 gdk_drop_finish(s_drop_ctx, accepted, s_drop_time);
                 g_object_unref(s_drop_ctx);
                 s_drop_ctx = NULL;
+              }
+              else
+              {
+                printf("swell-generic-gdk: XDND received XdndFinished but s_drop_ctx is NULL!\n");
               }
               clear_relay_drag_status_ctx();
               return GDK_FILTER_REMOVE;
             }
             else if (cm->message_type == s_xdndStatus)
             {
+              printf("swell-generic-gdk: XDND received XdndStatus from plugin window 0x%lx data.l[1]=0x%lx data.l[4]=0x%lx\n", (unsigned long)cm->window, (unsigned long)cm->data.l[1], (unsigned long)cm->data.l[4]);
               if (s_drag_status_ctx)
               {
                 const bool accepted = (cm->data.l[1] & 1) != 0;
@@ -3273,7 +3292,12 @@ static GdkFilterReturn filterCreateShowProc(GdkXEvent *xev, GdkEvent *event, gpo
                     action = GDK_ACTION_COPY;
                 }
 
+                printf("swell-generic-gdk: XDND relaying XdndStatus -> gdk_drag_status(accepted=%d action=%d)\n", (int)accepted, (int)action);
                 gdk_drag_status(s_drag_status_ctx, action, s_drag_status_time);
+              }
+              else
+              {
+                printf("swell-generic-gdk: XDND received XdndStatus but s_drag_status_ctx is NULL!\n");
               }
               return GDK_FILTER_REMOVE;
             }
