@@ -119,6 +119,9 @@ static GdkDragContext *s_drop_ctx; // context for deferred gdk_drop_finish
 static guint32 s_drop_time; // timestamp for gdk_drop_finish
 static GdkDragContext *s_drag_status_ctx; // context for relayed XdndStatus -> gdk_drag_status
 static guint32 s_drag_status_time; // timestamp to use for gdk_drag_status
+static HWND s_last_hwnd; // top-level window receiving the drag
+static Window s_last_child_xw; // bridged plugin window currently under the cursor
+static Window s_last_bridge_xw; // SWELL bridge window above s_last_child_xw (used as XDND source override)
 
 static int gdk_options;
 #define OPTION_KEEP_OWNED_ABOVE 1
@@ -2846,6 +2849,60 @@ static void update_relay_drag_status_ctx(GdkDragContext *ctx, guint32 time)
   s_drag_status_time = time;
 }
 
+static void clear_drop_ctx()
+{
+  if (s_drop_ctx)
+  {
+    g_object_unref(s_drop_ctx);
+    s_drop_ctx = NULL;
+  }
+  s_drop_time = GDK_CURRENT_TIME;
+}
+
+static void set_drop_ctx(GdkDragContext *ctx, guint32 time)
+{
+  if (WDL_NOT_NORMALLY(!ctx))
+  {
+    clear_drop_ctx();
+    return;
+  }
+
+  if (s_drop_ctx != ctx)
+  {
+    if (s_drop_ctx)
+      g_object_unref(s_drop_ctx);
+
+    s_drop_ctx = (GdkDragContext*) g_object_ref(ctx);
+  }
+  s_drop_time = time;
+}
+
+static void clear_drag_target_child()
+{
+  s_last_child_xw = 0;
+  s_last_bridge_xw = 0;
+}
+
+static void set_drag_target_child(Window child_xw, Window bridge_xw)
+{
+  s_last_child_xw = child_xw;
+  s_last_bridge_xw = bridge_xw;
+}
+
+static void clear_drag_target()
+{
+  clear_drag_target_child();
+  s_last_hwnd = NULL;
+}
+
+// release everything
+static void end_drag_session()
+{
+  clear_drag_target();
+  clear_drop_ctx();
+  clear_relay_drag_status_ctx();
+}
+
 static Window hit_test_bridged_xw(HWND hwnd, int xpos, int ypos, Window *out_bridge = nullptr)
 {
   if (WDL_NOT_NORMALLY(!hwnd || !hwnd->m_oswindow)) return false;
@@ -2899,10 +2956,6 @@ static bool OnDragEventDelegate(GdkEvent *evt)
   // GDK_DROP_FINISHED
   // GDK_DROP_START
 
-  static HWND s_last_hwnd;
-  static Window s_last_child_xw;
-  // bridge window for source override
-  static Window s_last_bridge_xw;
   HWND hwnd = swell_oswindow_to_hwnd(((GdkEventAny*)evt)->window);
   GdkEventDND *e = (GdkEventDND *)evt;
 
@@ -2918,15 +2971,7 @@ static bool OnDragEventDelegate(GdkEvent *evt)
             forward_x11_drag_message(GDK_DRAG_LEAVE,e,s_last_child_xw);
         }
         else if (SWELL_DDrop_onDragLeave) SWELL_DDrop_onDragLeave();
-        s_last_child_xw = 0;
-        s_last_bridge_xw = 0;
-        s_last_hwnd = NULL;
-        // clean up stored drop context on leave (drag canceled)
-        if (s_drop_ctx) {
-          g_object_unref(s_drop_ctx);
-          s_drop_ctx = NULL;
-        }
-        clear_relay_drag_status_ctx();
+        end_drag_session();
       }
     break;
     case GDK_DROP_FINISHED:
@@ -2936,16 +2981,8 @@ static bool OnDragEventDelegate(GdkEvent *evt)
         if (validate_bridged_xw_from_tlhwnd(s_last_hwnd,s_last_child_xw))
           forward_x11_drag_message(GDK_DRAG_LEAVE,e,s_last_child_xw);
       }
-      s_last_child_xw = 0;
-      s_last_bridge_xw = 0;
-      s_last_hwnd = NULL;
+      end_drag_session();
       if (SWELL_DDrop_onDragLeave) SWELL_DDrop_onDragLeave();
-      // clean up stored drop context
-      if (s_drop_ctx) {
-        g_object_unref(s_drop_ctx);
-        s_drop_ctx = NULL;
-      }
-      clear_relay_drag_status_ctx();
     break;
     case GDK_DRAG_ENTER:
       printf("swell-generic-gdk: XDND GDK_DRAG_ENTER hwnd=%p\n", hwnd);
@@ -2957,19 +2994,10 @@ static bool OnDragEventDelegate(GdkEvent *evt)
             forward_x11_drag_message(GDK_DRAG_LEAVE,e,s_last_child_xw);
         }
         else if (SWELL_DDrop_onDragLeave) SWELL_DDrop_onDragLeave();
-        s_last_child_xw = 0;
-        s_last_bridge_xw = 0;
-        s_last_hwnd = NULL;
-        // clean up on new drag enter
-        if (s_drop_ctx) {
-          g_object_unref(s_drop_ctx);
-          s_drop_ctx = NULL;
-        }
-        clear_relay_drag_status_ctx();
+        end_drag_session();
       }
       s_last_hwnd = hwnd;
-      s_last_child_xw = 0;
-      s_last_bridge_xw = 0;
+      clear_drag_target_child();
       clear_relay_drag_status_ctx();
       // position info is not yet available, assume top level window will get it
       if (WDL_NORMALLY(hwnd) && WDL_NORMALLY(e->context))
@@ -2997,8 +3025,7 @@ static bool OnDragEventDelegate(GdkEvent *evt)
               forward_x11_drag_message(GDK_DRAG_LEAVE,e,s_last_child_xw);
             forward_x11_drag_message(GDK_DRAG_ENTER,e,xw,bridge_xw);
           }
-          s_last_child_xw = xw;
-          s_last_bridge_xw = bridge_xw;
+          set_drag_target_child(xw, bridge_xw);
         }
         else
         {
@@ -3007,8 +3034,7 @@ static bool OnDragEventDelegate(GdkEvent *evt)
           {
             if (validate_top_hwnd(s_last_hwnd) && validate_bridged_xw_from_tlhwnd(s_last_hwnd,s_last_child_xw))
               forward_x11_drag_message(GDK_DRAG_LEAVE,e,s_last_child_xw);
-            s_last_child_xw = 0;
-            s_last_bridge_xw = 0;
+            clear_drag_target_child();
             notify_drag_enter((int)e->x_root, (int)e->y_root);
           }
         }
@@ -3037,15 +3063,9 @@ static bool OnDragEventDelegate(GdkEvent *evt)
           if (WDL_NORMALLY(validate_bridged_xw_from_tlhwnd(hwnd,s_last_child_xw)))
           {
             forward_x11_drag_message(GDK_DROP_START,e,s_last_child_xw,s_last_bridge_xw);
-            // store context (gdk_drop_finish will be called when plugin sends XdndFinished)
-            if (s_drop_ctx)
-              g_object_unref(s_drop_ctx);
-
-            s_drop_ctx = (GdkDragContext*)g_object_ref(e->context);
-            s_drop_time = e->time;
-            s_last_hwnd = NULL;
-            s_last_child_xw = 0;
-            s_last_bridge_xw = 0;
+            // gdk_drop_finish is deferred until the plugin sends XdndFinished (relayed by filterCreateShowProc)
+            set_drop_ctx(e->context, e->time);
+            clear_drag_target();
             clear_relay_drag_status_ctx();
           }
         }
@@ -3255,8 +3275,7 @@ static GdkFilterReturn filterCreateShowProc(GdkXEvent *xev, GdkEvent *event, gpo
                 bool accepted = (cm->data.l[1] & 1) != 0;
                 printf("swell-generic-gdk: XDND relaying XdndFinished -> gdk_drop_finish(accepted=%d)\n", (int)accepted);
                 gdk_drop_finish(s_drop_ctx, accepted, s_drop_time);
-                g_object_unref(s_drop_ctx);
-                s_drop_ctx = NULL;
+                clear_drop_ctx();
               }
               else
               {
