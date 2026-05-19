@@ -119,9 +119,9 @@ static GdkDragContext *s_drop_ctx; // context for deferred gdk_drop_finish
 static guint32 s_drop_time; // timestamp for gdk_drop_finish
 static GdkDragContext *s_drag_status_ctx; // context for relayed XdndStatus -> gdk_drag_status
 static guint32 s_drag_status_time; // timestamp to use for gdk_drag_status
-static HWND s_last_hwnd; // top-level window receiving the drag
-static Window s_last_child_xw; // bridged plugin window currently under the cursor
-static Window s_last_bridge_xw; // SWELL bridge window above s_last_child_xw (used as XDND source override)
+static HWND s_drag_target_hwnd; // top-level window receiving the drag
+static Window s_drag_target_child_xw; // bridged plugin window currently under the cursor
+static Window s_drag_target_bridge_xw; // SWELL bridge window above s_drag_target_child_xw that acts as the drag source for the synthetic XDND events sent to the plugin
 
 static int gdk_options;
 #define OPTION_KEEP_OWNED_ABOVE 1
@@ -2789,7 +2789,7 @@ static void notify_drag_enter(int xpos, int ypos)
 static bool validate_top_hwnd(HWND hwnd)
 {
   if (!hwnd) return false;
-  HWND h = SWELL_topwindows; // ensure s_last_hwnd is a valid top level window
+  HWND h = SWELL_topwindows; // ensure s_drag_target_hwnd is a valid top level window
   while (h && h != hwnd) h = h->m_next;
   return h != NULL;
 }
@@ -2879,20 +2879,20 @@ static void set_drop_ctx(GdkDragContext *ctx, guint32 time)
 
 static void clear_drag_target_child()
 {
-  s_last_child_xw = 0;
-  s_last_bridge_xw = 0;
+  s_drag_target_child_xw = 0;
+  s_drag_target_bridge_xw = 0;
 }
 
 static void set_drag_target_child(Window child_xw, Window bridge_xw)
 {
-  s_last_child_xw = child_xw;
-  s_last_bridge_xw = bridge_xw;
+  s_drag_target_child_xw = child_xw;
+  s_drag_target_bridge_xw = bridge_xw;
 }
 
 static void clear_drag_target()
 {
   clear_drag_target_child();
-  s_last_hwnd = NULL;
+  s_drag_target_hwnd = NULL;
 }
 
 // release everything
@@ -2962,41 +2962,41 @@ static bool OnDragEventDelegate(GdkEvent *evt)
   switch (evt->type)
   {
     case GDK_DRAG_LEAVE:
-      printf("swell-generic-gdk: XDND GDK_DRAG_LEAVE hwnd=%p s_last_hwnd=%p s_last_child_xw=0x%lx\n", hwnd, s_last_hwnd, (unsigned long)s_last_child_xw);
-      if (s_last_hwnd && s_last_hwnd == hwnd)
+      printf("swell-generic-gdk: XDND GDK_DRAG_LEAVE hwnd=%p s_drag_target_hwnd=%p s_drag_target_child_xw=0x%lx\n", hwnd, s_drag_target_hwnd, (unsigned long)s_drag_target_child_xw);
+      if (s_drag_target_hwnd && s_drag_target_hwnd == hwnd)
       {
-        if (s_last_child_xw)
+        if (s_drag_target_child_xw)
         {
-          if (validate_bridged_xw_from_tlhwnd(s_last_hwnd,s_last_child_xw))
-            forward_x11_drag_message(GDK_DRAG_LEAVE,e,s_last_child_xw);
+          if (validate_bridged_xw_from_tlhwnd(s_drag_target_hwnd,s_drag_target_child_xw))
+            forward_x11_drag_message(GDK_DRAG_LEAVE,e,s_drag_target_child_xw);
         }
         else if (SWELL_DDrop_onDragLeave) SWELL_DDrop_onDragLeave();
         end_drag_session();
       }
     break;
     case GDK_DROP_FINISHED:
-      printf("swell-generic-gdk: XDND GDK_DROP_FINISHED hwnd=%p s_last_child_xw=0x%lx\n", hwnd, (unsigned long)s_last_child_xw);
-      if (s_last_child_xw && validate_top_hwnd(s_last_hwnd))
+      printf("swell-generic-gdk: XDND GDK_DROP_FINISHED hwnd=%p s_drag_target_child_xw=0x%lx\n", hwnd, (unsigned long)s_drag_target_child_xw);
+      if (s_drag_target_child_xw && validate_top_hwnd(s_drag_target_hwnd))
       {
-        if (validate_bridged_xw_from_tlhwnd(s_last_hwnd,s_last_child_xw))
-          forward_x11_drag_message(GDK_DRAG_LEAVE,e,s_last_child_xw);
+        if (validate_bridged_xw_from_tlhwnd(s_drag_target_hwnd,s_drag_target_child_xw))
+          forward_x11_drag_message(GDK_DRAG_LEAVE,e,s_drag_target_child_xw);
       }
       end_drag_session();
       if (SWELL_DDrop_onDragLeave) SWELL_DDrop_onDragLeave();
     break;
     case GDK_DRAG_ENTER:
       printf("swell-generic-gdk: XDND GDK_DRAG_ENTER hwnd=%p\n", hwnd);
-      if (s_last_hwnd != hwnd && validate_top_hwnd(s_last_hwnd))
+      if (s_drag_target_hwnd != hwnd && validate_top_hwnd(s_drag_target_hwnd))
       {
-        if (s_last_child_xw)
+        if (s_drag_target_child_xw)
         {
-          if (validate_bridged_xw_from_tlhwnd(s_last_hwnd,s_last_child_xw))
-            forward_x11_drag_message(GDK_DRAG_LEAVE,e,s_last_child_xw);
+          if (validate_bridged_xw_from_tlhwnd(s_drag_target_hwnd,s_drag_target_child_xw))
+            forward_x11_drag_message(GDK_DRAG_LEAVE,e,s_drag_target_child_xw);
         }
         else if (SWELL_DDrop_onDragLeave) SWELL_DDrop_onDragLeave();
         end_drag_session();
       }
-      s_last_hwnd = hwnd;
+      s_drag_target_hwnd = hwnd;
       clear_drag_target_child();
       clear_relay_drag_status_ctx();
       // position info is not yet available, assume top level window will get it
@@ -3014,15 +3014,15 @@ static bool OnDragEventDelegate(GdkEvent *evt)
         if (xw)
         {
           update_relay_drag_status_ctx(e->context,e->time);
-          if (!s_last_child_xw)
+          if (!s_drag_target_child_xw)
           {
             if (SWELL_DDrop_onDragLeave) SWELL_DDrop_onDragLeave();
           }
 
-          if (xw != s_last_child_xw)
+          if (xw != s_drag_target_child_xw)
           {
-            if (s_last_child_xw && validate_top_hwnd(s_last_hwnd) && validate_bridged_xw_from_tlhwnd(s_last_hwnd,s_last_child_xw))
-              forward_x11_drag_message(GDK_DRAG_LEAVE,e,s_last_child_xw);
+            if (s_drag_target_child_xw && validate_top_hwnd(s_drag_target_hwnd) && validate_bridged_xw_from_tlhwnd(s_drag_target_hwnd,s_drag_target_child_xw))
+              forward_x11_drag_message(GDK_DRAG_LEAVE,e,s_drag_target_child_xw);
             forward_x11_drag_message(GDK_DRAG_ENTER,e,xw,bridge_xw);
           }
           set_drag_target_child(xw, bridge_xw);
@@ -3030,15 +3030,15 @@ static bool OnDragEventDelegate(GdkEvent *evt)
         else
         {
           clear_relay_drag_status_ctx();
-          if (s_last_child_xw)
+          if (s_drag_target_child_xw)
           {
-            if (validate_top_hwnd(s_last_hwnd) && validate_bridged_xw_from_tlhwnd(s_last_hwnd,s_last_child_xw))
-              forward_x11_drag_message(GDK_DRAG_LEAVE,e,s_last_child_xw);
+            if (validate_top_hwnd(s_drag_target_hwnd) && validate_bridged_xw_from_tlhwnd(s_drag_target_hwnd,s_drag_target_child_xw))
+              forward_x11_drag_message(GDK_DRAG_LEAVE,e,s_drag_target_child_xw);
             clear_drag_target_child();
             notify_drag_enter((int)e->x_root, (int)e->y_root);
           }
         }
-        s_last_hwnd = hwnd;
+        s_drag_target_hwnd = hwnd;
         if (xw)
         {
           // Forward XdndPosition so that the action (usually affecting mouse cursor icon) will be set by the plugin's relayed XdndStatus.
@@ -3057,12 +3057,12 @@ static bool OnDragEventDelegate(GdkEvent *evt)
     break;
     case GDK_DROP_START:
       {
-        printf("swell-generic-gdk: XDND GDK_DROP_START hwnd=%p s_last_hwnd=%p s_last_child_xw=0x%lx\n", hwnd, s_last_hwnd, (unsigned long)s_last_child_xw);
-        if (hwnd && hwnd == s_last_hwnd && s_last_child_xw)
+        printf("swell-generic-gdk: XDND GDK_DROP_START hwnd=%p s_drag_target_hwnd=%p s_drag_target_child_xw=0x%lx\n", hwnd, s_drag_target_hwnd, (unsigned long)s_drag_target_child_xw);
+        if (hwnd && hwnd == s_drag_target_hwnd && s_drag_target_child_xw)
         {
-          if (WDL_NORMALLY(validate_bridged_xw_from_tlhwnd(hwnd,s_last_child_xw)))
+          if (WDL_NORMALLY(validate_bridged_xw_from_tlhwnd(hwnd,s_drag_target_child_xw)))
           {
-            forward_x11_drag_message(GDK_DROP_START,e,s_last_child_xw,s_last_bridge_xw);
+            forward_x11_drag_message(GDK_DROP_START,e,s_drag_target_child_xw,s_drag_target_bridge_xw);
             // gdk_drop_finish is deferred until the plugin sends XdndFinished (relayed by filterCreateShowProc)
             set_drop_ctx(e->context, e->time);
             clear_drag_target();
