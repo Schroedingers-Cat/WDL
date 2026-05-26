@@ -2673,10 +2673,61 @@ static LRESULT xbridgeProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 }
 
 
+static bool x11_get_window_property_window(Display *disp, Window w, Atom prop, Window *outw)
+{
+  if (!outw) return false;
+  *outw = 0;
+
+  Atom type = None;
+  int format = 0;
+  unsigned long nitems = 0, bytes_after = 0;
+  unsigned char *data = NULL;
+  const int rv = XGetWindowProperty(disp, w, prop, 0, 1, False, XA_WINDOW, &type, &format, &nitems, &bytes_after, &data);
+  if (rv == Success && type == XA_WINDOW && format == 32 && nitems > 0 && data)
+  {
+    *outw = *((Window *)data);
+    XFree(data);
+    return true;
+  }
+  if (data) XFree(data);
+  return false;
+}
+
+static bool x11_has_xdnd_aware(Display *disp, Window w, Atom aware_atom)
+{
+  Atom type = None;
+  int format = 0;
+  unsigned long nitems = 0, bytes_after = 0;
+  unsigned char *data = NULL;
+  const int rv = XGetWindowProperty(disp, w, aware_atom, 0, 1, False, AnyPropertyType, &type, &format, &nitems, &bytes_after, &data);
+  if (data) XFree(data);
+  return rv == Success && type != None && format == 32 && nitems > 0;
+}
+
 static void forward_x11_drag_message(int gdkmsg, GdkEventDND *gdkevent, Window new_target)
 {
   Display *dpy = gdk_x11_display_get_xdisplay(gdk_window_get_display(gdkevent->window));
   if (WDL_NOT_NORMALLY(!dpy)) return;
+
+  Window send_target = new_target;
+  {
+    const Atom xdnd_proxy_atom = XInternAtom(dpy, "XdndProxy", False);
+    const Atom xdnd_aware_atom = XInternAtom(dpy, "XdndAware", False);
+
+    Window proxy_w = 0;
+    if (xdnd_proxy_atom && xdnd_aware_atom &&
+        x11_get_window_property_window(dpy, new_target, xdnd_proxy_atom, &proxy_w) &&
+        proxy_w)
+    {
+      Window proxy_self = 0;
+      if (x11_get_window_property_window(dpy, proxy_w, xdnd_proxy_atom, &proxy_self) &&
+          proxy_self == proxy_w &&
+          x11_has_xdnd_aware(dpy, proxy_w, xdnd_aware_atom))
+      {
+        send_target = proxy_w;
+      }
+    }
+  }
 
   XClientMessageEvent xev;
   memset(&xev, 0, sizeof(xev));
@@ -2733,7 +2784,7 @@ static void forward_x11_drag_message(int gdkmsg, GdkEventDND *gdkevent, Window n
     return;
   }
 
-  XSendEvent(dpy, new_target, False, NoEventMask, (XEvent*)&xev);
+  XSendEvent(dpy, send_target, False, NoEventMask, (XEvent*)&xev);
   XFlush(dpy);
 }
 
