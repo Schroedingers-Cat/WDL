@@ -2681,7 +2681,7 @@ static void forward_x11_drag_message(int gdkmsg, GdkEventDND *gdkevent, Window n
   XClientMessageEvent xev;
   memset(&xev, 0, sizeof(xev));
   xev.type = ClientMessage;
-  xev.window = new_target;
+  xev.window = gdkevent->window ? GDK_WINDOW_XID(gdkevent->window) : new_target;
   xev.format = 32;
   GdkWindow *sw = gdk_drag_context_get_source_window(gdkevent->context);
   Window source_window = GDK_WINDOW_XID(sw);
