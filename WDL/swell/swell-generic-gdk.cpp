@@ -2810,6 +2810,72 @@ static bool validate_top_hwnd(HWND hwnd)
   return h != NULL;
 }
 
+static bool read_x11_window_prop_as_window(Display *dpy, Window w, Atom prop, Window *valueOut)
+{
+  if (WDL_NOT_NORMALLY(!dpy || !w || !prop || !valueOut)) return false;
+
+  Atom type = None;
+  int format = 0;
+  unsigned long nitems = 0, bytes_after = 0;
+  unsigned char *data = NULL;
+
+  const bool ok = XGetWindowProperty(dpy, w, prop, 0, 1, False, XA_WINDOW,
+      &type, &format, &nitems, &bytes_after, &data) == Success && data &&
+      type == XA_WINDOW && format == 32 && nitems > 0;
+
+  if (ok)
+    *valueOut = (Window) ((unsigned long *) data)[0];
+
+  if (data) XFree(data);
+  return ok;
+}
+
+static bool window_has_xdnd_aware(Display *dpy, Window w, Atom xdndAware)
+{
+  if (WDL_NOT_NORMALLY(!dpy || !w || !xdndAware)) return false;
+
+  Atom type = None;
+  int format = 0;
+  unsigned long nitems = 0, bytes_after = 0;
+  unsigned char *data = NULL;
+
+  const bool ok = XGetWindowProperty(dpy, w, xdndAware, 0, 1, False, AnyPropertyType,
+      &type, &format, &nitems, &bytes_after, &data) == Success && data &&
+      type != None && format == 32 && nitems > 0;
+
+  if (data) XFree(data);
+  return ok;
+}
+
+static bool resolve_xdnd_forward_target(Display *dpy, Window candidate, Window *targetOut)
+{
+  if (WDL_NOT_NORMALLY(!dpy || !candidate || !targetOut)) return false;
+
+  const Atom xdndAware = XInternAtom(dpy, "XdndAware", False);
+  const Atom xdndProxy = XInternAtom(dpy, "XdndProxy", False);
+  if (WDL_NOT_NORMALLY(!xdndAware || !xdndProxy)) return false;
+
+  if (window_has_xdnd_aware(dpy, candidate, xdndAware))
+  {
+    *targetOut = candidate;
+    return true;
+  }
+
+  Window proxy = 0;
+  if (!read_x11_window_prop_as_window(dpy, candidate, xdndProxy, &proxy) || !proxy)
+    return false;
+
+  Window proxySelf = 0;
+  if (!read_x11_window_prop_as_window(dpy, proxy, xdndProxy, &proxySelf) || proxySelf != proxy)
+    return false;
+
+  if (!window_has_xdnd_aware(dpy, proxy, xdndAware))
+    return false;
+
+  *targetOut = proxy;
+  return true;
+}
+
 static bool validate_bridged_xw_from_tlhwnd(HWND hwnd, Window xw)
 {
   if (WDL_NOT_NORMALLY(!hwnd || !hwnd->m_oswindow || !xw)) return false;
@@ -2826,6 +2892,13 @@ static bool validate_bridged_xw_from_tlhwnd(HWND hwnd, Window xw)
       for (unsigned int i = 0; i < nlist; i ++)
       {
         if (list[i] == xw)
+        {
+          XFree(list);
+          return true;
+        }
+
+        Window resolved = 0;
+        if (resolve_xdnd_forward_target(dpy, list[i], &resolved) && resolved == xw)
         {
           XFree(list);
           return true;
@@ -2867,23 +2940,12 @@ static Window hit_test_bridged_xw(HWND hwnd, int xpos, int ypos, Window *proxyOu
         memset(&xwa,0,sizeof(xwa));
         if (XGetWindowAttributes(dpy, list[i], &xwa) && lx >= xwa.x && ly >= xwa.y && lx < xwa.x+xwa.width && ly < xwa.y+xwa.height)
         {
-          // make sure this window can do XdndAware
-          Atom type;
-          gint format;
-          gulong nitems=0, bytes_after;
-          guchar *data = NULL;
-
-          if (XGetWindowProperty(dpy, list[i], XInternAtom(dpy,"XdndAware",False), 0, 1, false, XA_ATOM, &type, &format, &nitems, &bytes_after, &data) == Success && nitems > 0)
+          Window resolved = 0;
+          if (resolve_xdnd_forward_target(dpy, list[i], &resolved))
           {
-            if (type == XA_ATOM)
-            {
-              // this would be where to check for XdndProxy and resolve it.
-              new_target = list[i];
-              *proxyOut = bs->native_w;
-            }
-            if (data) XFree(data);
+            new_target = resolved;
+            *proxyOut = bs->native_w;
           }
-
         }
       }
       XFree(list);
