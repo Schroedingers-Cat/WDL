@@ -3103,6 +3103,19 @@ static bool OnDragEventDelegate(GdkEvent *evt)
 
 static const char * const bridge_class_name = "__swell_xbridgewndclass";
 
+static bool is_bridge_parent_window(Display *disp, Window scan_id)
+{
+  for (int x=0;x<filter_windows.GetSize(); x++)
+  {
+    bridgeState *bs = filter_windows.Get(x);
+    if (bs && bs->cur_parent &&
+        bs->cur_parent_xid == scan_id &&
+        bs->native_disp == disp)
+      return true;
+  }
+  return false;
+}
+
 static bool want_key_embed_redirect(Display *disp, Window scan_id, Window *new_dest, int keycode, int modstate)
 {
   for (int x=0;x<filter_windows.GetSize(); x++)
@@ -3168,6 +3181,12 @@ static GdkFilterReturn filterCreateShowProc(GdkXEvent *xev, GdkEvent *event, gpo
           k.xkey.window = dest;
           XSendEvent(disp, dest, False, NoEventMask, &k);
           return GDK_FILTER_REMOVE;
+        }
+        // Synthetic key events sent back from a child bridge window. Let the host process them (don't forward back to child to avoid loops)
+        if (xevent->xany.send_event &&
+            is_bridge_parent_window(disp, xevent->xkey.window - 1))
+        {
+          return GDK_FILTER_CONTINUE;
         }
       }
     break;
