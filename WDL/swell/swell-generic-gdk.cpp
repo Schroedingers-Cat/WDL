@@ -3127,9 +3127,18 @@ static bool want_key_embed_redirect(Display *disp, Window scan_id, Window *new_d
         unsigned int nlist=0;
         if (XQueryTree(bs->native_disp,bs->native_w,&root,&par,&list, &nlist) && list)
         {
-          if (nlist) *new_dest = list[0];
-          XFree(list);
-          if (nlist) return true;
+            if (nlist)
+            {
+                *new_dest = list[0];
+                XFree(list);
+                // Only forward if the child window has KeyPressMask in its event mask. This lets plugins selectively disable key event forwarding by removing KeyPressMask from their XCB window's event mask.
+                XWindowAttributes attr;
+                if (XGetWindowAttributes(bs->native_disp, *new_dest, &attr) &&
+                    (attr.all_event_masks & KeyPressMask))
+                return true;
+            }
+            else
+                XFree(list);
         }
       }
     }
