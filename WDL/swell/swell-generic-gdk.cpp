@@ -3160,6 +3160,22 @@ static GdkFilterReturn filterCreateShowProc(GdkXEvent *xev, GdkEvent *event, gpo
           XSendEvent(disp, dest, False, NoEventMask, &k);
           return GDK_FILTER_REMOVE;
         }
+        // Synthetic key event from plugin on native_w (non-GDK window).
+        if (xevent->xany.send_event)
+        {
+          // Forward to the GDK window (cur_parent_xid) so GDK can process it and dispatch to OnKeyEvent. The re-sent event arrives on cur_parent_xid (not native_w), so this check won't match again (no infinite loop).
+          for(int x = 0; x < filter_windows.GetSize(); x++)
+          {
+            bridgeState *bs = filter_windows.Get(x);
+            if (bs && bs->cur_parent && bs->native_w == xevent->xkey.window && bs->native_disp == disp)
+            {
+              XEvent k = *xevent;
+              k.xkey.window = bs->cur_parent_xid;
+              XSendEvent(disp, bs->cur_parent_xid, False, NoEventMask, &k);
+              return GDK_FILTER_REMOVE;
+            }
+          }
+        }
       }
     break;
     case FocusIn:
