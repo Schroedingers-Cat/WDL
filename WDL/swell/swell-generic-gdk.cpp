@@ -52,6 +52,8 @@ extern "C" {
 #include <X11/extensions/XInput2.h>
 
 #include <X11/Xatom.h>
+#include <X11/XKBlib.h>
+#include <X11/keysym.h>
 
 #include <GL/gl.h>
 #include <GL/glx.h>
@@ -3103,6 +3105,45 @@ static bool OnDragEventDelegate(GdkEvent *evt)
 
 static const char * const bridge_class_name = "__swell_xbridgewndclass";
 
+static bool key_is_handled_by_child(Display *disp, Window child_w, int keycode)
+{
+  const KeySym ks0 = XkbKeycodeToKeysym(disp, keycode, 0, 0);
+  const KeySym ks1 = XkbKeycodeToKeysym(disp, keycode, 0, 1);
+  if (!ks0 && !ks1) return false;
+
+  const Atom handled_atom = XInternAtom(disp, "UHE_HANDLED_KEYSYMS", False);
+  if (handled_atom == None) return true;
+
+  Atom actual_type = None;
+  int actual_format = 0;
+  unsigned long nitems = 0;
+  unsigned long bytes_after = 0;
+  unsigned char *data = NULL;
+
+  const int ok = XGetWindowProperty(disp, child_w, handled_atom, 0, 1024, False, XA_INTEGER, &actual_type, &actual_format, &nitems, &bytes_after, &data);
+
+  if (ok != Success || !data || actual_format != 32)
+  {
+    if (data) XFree(data);
+    return true;
+  }
+
+  const unsigned long *vals = (const unsigned long *)data;
+  bool handled = false;
+  for (unsigned long i = 0; i < nitems; ++i)
+  {
+    const KeySym v = (KeySym) vals[i];
+    if ((ks0 && v == ks0) || (ks1 && v == ks1))
+    {
+      handled = true;
+      break;
+    }
+  }
+
+  XFree(data);
+  return handled;
+}
+
 static bool is_bridge_parent_window(Display *disp, Window scan_id)
 {
   for (int x=0;x<filter_windows.GetSize(); x++)
@@ -3140,18 +3181,22 @@ static bool want_key_embed_redirect(Display *disp, Window scan_id, Window *new_d
         unsigned int nlist=0;
         if (XQueryTree(bs->native_disp,bs->native_w,&root,&par,&list, &nlist) && list)
         {
-            if (nlist)
-            {
-                *new_dest = list[0];
-                XFree(list);
-                // Only forward if the child window has KeyPressMask in its event mask. This lets plugins selectively disable key event forwarding by removing KeyPressMask from their XCB window's event mask.
-                XWindowAttributes attr;
-                if (XGetWindowAttributes(bs->native_disp, *new_dest, &attr) &&
-                    (attr.all_event_masks & KeyPressMask))
-                return true;
-            }
-            else
-                XFree(list);
+          if (nlist)
+          {
+            *new_dest = list[0];
+            XFree(list);
+
+            if (!key_is_handled_by_child(bs->native_disp, *new_dest, keycode))
+              return false;
+
+            // Only forward if the child window has KeyPressMask in its event mask. This lets plugins selectively disable key event forwarding by removing KeyPressMask from their XCB window's event mask.
+            XWindowAttributes attr;
+            if (XGetWindowAttributes(bs->native_disp, *new_dest, &attr) &&
+                (attr.all_event_masks & KeyPressMask))
+              return true;
+          }
+          else
+            XFree(list);
         }
       }
     }
