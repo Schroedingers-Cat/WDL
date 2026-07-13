@@ -3369,7 +3369,7 @@ HWND SWELL_CreateXBridgeWindow(HWND viewpar, void **wref, const RECT *r)
   {
     *wref = (void *) w;
 
-    XSelectInput(disp, w, StructureNotifyMask | SubstructureNotifyMask);
+    XSelectInput(disp, w, StructureNotifyMask | SubstructureNotifyMask | KeyPressMask | KeyReleaseMask);
 
     static bool filt_add;
     if (!filt_add)
