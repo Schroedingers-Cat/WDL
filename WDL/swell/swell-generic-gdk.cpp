@@ -3352,9 +3352,10 @@ HWND SWELL_CreateXBridgeWindow(HWND viewpar, void **wref, const RECT *r)
   }
 
   Display *disp = gdk_x11_display_get_xdisplay(gdk_window_get_display(ospar));
+  const long bridge_key_mask = KeyPressMask | KeyReleaseMask;
   XSetWindowAttributes attr;
   memset(&attr,0,sizeof(attr));
-  attr.event_mask = KeyPress|KeyRelease;
+  attr.event_mask = bridge_key_mask;
   Window w = XCreateWindow(disp,GDK_WINDOW_XID(ospar),0,0,
       wdl_max(r->right-r->left,1),
       wdl_max(r->bottom-r->top,1),
@@ -3369,7 +3370,7 @@ HWND SWELL_CreateXBridgeWindow(HWND viewpar, void **wref, const RECT *r)
   {
     *wref = (void *) w;
 
-    XSelectInput(disp, w, StructureNotifyMask | SubstructureNotifyMask | KeyPressMask | KeyReleaseMask);
+    XSelectInput(disp, w, StructureNotifyMask | SubstructureNotifyMask | bridge_key_mask);
 
     static bool filt_add;
     if (!filt_add)
